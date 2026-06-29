@@ -1,0 +1,1856 @@
+(function () {
+    'use strict';
+
+    const STRINGS = {
+        en: {
+            selectExperience: 'Select an experience',
+            selectDate:       'Select date',
+        },
+        es: {
+            selectExperience: 'Seleccione una experiencia',
+            selectDate:       'Seleccione fecha',
+        },
+    };
+
+    function getLang(el) {
+        return el && el.dataset.lang === 'es' ? 'es' : 'en';
+    }
+
+    /* =================================================================
+     * Ventrata Checkout SDK handoff helpers
+     *
+     * The plugin loads Ventrata's prebuilt checkout SDK
+     * (https://cdn.checkout.ventrata.com/v3/.../ventrata-checkout.min.js) when an
+     * API key is configured in WP settings. After our widget reserves a booking
+     * via OCTO, we hand off the booking UUID to the SDK's modal, which collects
+     * contact info, processes payment, and confirms the booking.
+     * ================================================================= */
+
+    function getCheckoutLang() {
+        try {
+            const lang = window.ventrataConfig?.checkout?.lang;
+            if (typeof lang === 'string' && /^[a-z]{2}$/i.test(lang)) {
+                return lang.toLowerCase();
+            }
+        } catch (e) { /* no-op */ }
+        return 'en';
+    }
+
+    /**
+     * Build the data-config object handed to Ventrata's checkout SDK,
+     * matching the authoritative Supported Configuration Inputs reference:
+     *   https://support.ventrata.com/en/articles/10155297-supported-configuration-inputs
+     *   https://support.ventrata.com/en/articles/9556104-how-to-use-the-multibooking-feature
+     *
+     * Pre-selection paths (use whichever data we have):
+     *   • dateToPreselect (YYYY-MM-DD) + timeslotToPreselect (HH:MM)
+     *     — pre-fills the calendar/time without needing an existing order.
+     *   • multibooking:true + orderID + bookingID
+     *     — edit-booking flow, opens an existing booking (date/time/guests
+     *       already locked in). Optionally combine with page:"checkout" to
+     *       jump straight to the contact + payment step.
+     *
+     * @param {Object} args
+     * @returns {Object}
+     */
+    function buildCheckoutHandoffConfig(args) {
+        const cfg = {
+            productID: args.productId,
+            lang: getCheckoutLang(),
+        };
+        if (args.optionId && args.optionId !== 'DEFAULT') {
+            cfg.optionID = args.optionId;
+        }
+        if (args.currency) cfg.currency = args.currency;
+        if (args.dateToPreselect) cfg.dateToPreselect = args.dateToPreselect;
+        if (args.timeslotToPreselect) cfg.timeslotToPreselect = args.timeslotToPreselect;
+        if (args.referrer) cfg.referrer = args.referrer;
+        if (args.promoCode) cfg.promoCode = args.promoCode;
+        if (args.externalOrderId) cfg.externalOrderID = args.externalOrderId;
+        if (args.orderId && args.bookingId) {
+            cfg.multibooking = true;
+            cfg.orderID = args.orderId;
+            cfg.bookingID = args.bookingId;
+            // Skip the picker entirely — the booking is already configured.
+            cfg.page = 'checkout';
+        }
+        return cfg;
+    }
+
+    /**
+     * Extract HH:MM from an OCTO availability id or localDateTimeStart string
+     * (e.g. "2026-05-06T14:30:00+00:00" → "14:30"). Returns '' on failure.
+     */
+    function extractTimeslotHHMM(isoLike) {
+        if (!isoLike || typeof isoLike !== 'string') return '';
+        const m = isoLike.match(/T(\d{2}):(\d{2})/);
+        return m ? `${m[1]}:${m[2]}` : '';
+    }
+
+    function isVentrataCheckoutEnabled() {
+        // Authoritative check: is the SDK actually present on the page right now?
+        // Falling back to the PHP `enabled` flag is unsafe — that flag tracks
+        // whether *we* have a Checkout API key configured, but the SDK might
+        // not be loaded (e.g. when the theme loads it on some pages but not
+        // this one).
+        if (typeof window.Ventrata === 'function') return true;
+        if (window.Ventrata && typeof window.Ventrata.open === 'function') return true;
+        if (typeof window.VentrataCheckout === 'function') return true;
+        return false;
+    }
+
+    /**
+     * Programmatically open Ventrata's prebuilt checkout modal with the supplied
+     * config. Returns true if a handoff was attempted, false if the SDK is not
+     * configured/available.
+     *
+     * @param {Object} config { bookingUUID, productID, optionID, lang, ... }
+     */
+    /**
+     * Temporarily wrap `window.fetch` to capture failed Ventrata API responses
+     * during the handoff. We only inspect responses; we never alter them.
+     * Returns a controller with `getErrors()` and `stop()`.
+     */
+    function captureVentrataDiagnostics() {
+        const errors = [];
+        const originalFetch = typeof window.fetch === 'function' ? window.fetch.bind(window) : null;
+        if (!originalFetch) {
+            return { getErrors: () => [], stop: () => {} };
+        }
+        const wrapped = async function (...args) {
+            let url = '';
+            try {
+                url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
+            } catch (e) { /* no-op */ }
+
+            let response;
+            try {
+                response = await originalFetch(...args);
+            } catch (err) {
+                if (url && url.includes('ventrata.com')) {
+                    errors.push({
+                        url,
+                        status: 0,
+                        errorCode: 'NETWORK_ERROR',
+                        errorMessage: err && err.message ? err.message : 'Network error',
+                    });
+                }
+                throw err;
+            }
+
+            try {
+                if (url && url.includes('ventrata.com') && !response.ok) {
+                    const clone = response.clone();
+                    const text = await clone.text();
+                    let parsed = null;
+                    try { parsed = JSON.parse(text); } catch (e) { /* not JSON */ }
+                    errors.push({
+                        url,
+                        status: response.status,
+                        errorCode: (parsed && (parsed.errorCode || parsed.error)) || `HTTP_${response.status}`,
+                        errorMessage: (parsed && (parsed.errorMessage || parsed.message)) || text.slice(0, 280),
+                    });
+                }
+            } catch (e) { /* ignore inspection errors */ }
+
+            return response;
+        };
+        window.fetch = wrapped;
+        return {
+            getErrors: () => errors.slice(),
+            stop: () => {
+                if (window.fetch === wrapped) {
+                    window.fetch = originalFetch;
+                }
+            },
+        };
+    }
+
+    /**
+     * Detect when the Ventrata SDK has rendered its modal in the DOM. Resolves
+     * with `true` once a likely SDK element appears, or `false` after `timeoutMs`.
+     */
+    function waitForVentrataModalRendered(timeoutMs = 6000) {
+        return new Promise((resolve) => {
+            const baseline = new Set(Array.from(document.body.children));
+
+            const findCandidate = () => {
+                const named = findVentrataModalElement();
+                if (named) return named;
+                for (const el of document.body.children) {
+                    if (baseline.has(el)) continue;
+                    const tag = el.tagName;
+                    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK') continue;
+                    if (el.classList && (
+                        el.classList.contains('vbw-container')
+                        || el.classList.contains('vbw-bar')
+                        || el.classList.contains('vbw-schedule')
+                        || el.classList.contains('vbw-route-schedule')
+                        || el.classList.contains('vbw-quote')
+                    )) continue;
+                    if (el.shadowRoot) return el;
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width >= 200 && rect.height >= 200) return el;
+                }
+                return null;
+            };
+
+            if (findCandidate()) {
+                resolve(true);
+                return;
+            }
+            let settled = false;
+            const observer = new MutationObserver(() => {
+                if (findCandidate()) cleanup(true);
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+            const interval = setInterval(() => {
+                if (findCandidate()) cleanup(true);
+            }, 250);
+            const timer = setTimeout(() => cleanup(false), timeoutMs);
+            function cleanup(value) {
+                if (settled) return;
+                settled = true;
+                observer.disconnect();
+                clearInterval(interval);
+                clearTimeout(timer);
+                resolve(value);
+            }
+        });
+    }
+
+    /**
+     * Heuristic detection of a SDK-rendered modal/iframe in the DOM. Excludes
+     * our own widget elements and the SDK's own <script> tag.
+     */
+    function findVentrataModalElement() {
+        const nodes = document.body.querySelectorAll(
+            'iframe, dialog, [class*="ventrata"], [id*="ventrata"], [class*="checkout"], [id*="checkout"]'
+        );
+        for (const el of nodes) {
+            const tag = el.tagName;
+            if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK') continue;
+            if (el.closest && el.closest('.vbw-container, .vbw-bar, .vbw-modal, .vbw-schedule, .vbw-route-schedule, .vbw-quote')) continue;
+            if (tag === 'BUTTON' && el.hasAttribute('ventrata-checkout')) continue;
+
+            const cls = (el.className || '').toString().toLowerCase();
+            const id = (el.id || '').toLowerCase();
+            const matchesVentrata = cls.includes('ventrata') || id.includes('ventrata');
+
+            if (tag === 'IFRAME') {
+                const src = el.getAttribute('src') || '';
+                if (src.includes('ventrata') || src.includes('checkout')) return el;
+                if (matchesVentrata) return el;
+            } else if (matchesVentrata) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width >= 100 && rect.height >= 100) return el;
+            }
+        }
+        return null;
+    }
+
+    function openVentrataCheckout(config) {
+        if (!config || !isVentrataCheckoutEnabled()) {
+            return false;
+        }
+        // Visible diagnostic so the page owner can verify the exact config we
+        // hand to the SDK in DevTools.
+        try { console.info('[ventrata] openVentrataCheckout config:', config); } catch (e) {}
+
+        // Documented programmatic API: window.Ventrata is itself a callable
+        // function. See https://support.ventrata.com/en/articles/9556104-how-to-use-the-multibooking-feature
+        try {
+            if (typeof window.Ventrata === 'function') {
+                window.Ventrata(config);
+                return true;
+            }
+            // Some SDK versions expose the callable on .open() instead.
+            if (window.Ventrata && typeof window.Ventrata.open === 'function') {
+                window.Ventrata.open(config);
+                return true;
+            }
+            if (window.VentrataCheckout && typeof window.VentrataCheckout === 'function') {
+                window.VentrataCheckout(config);
+                return true;
+            }
+        } catch (e) { /* fall through to attribute-driven fallback */ }
+
+        // Fallback: simulate the documented `<button ventrata-checkout data-config="...">`
+        // pattern by injecting a hidden button and dispatching a click on it.
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.setAttribute('ventrata-checkout', '');
+        btn.setAttribute('data-config', JSON.stringify(config));
+        btn.style.position = 'absolute';
+        btn.style.left = '-9999px';
+        btn.style.top = '-9999px';
+        btn.setAttribute('aria-hidden', 'true');
+        btn.tabIndex = -1;
+        document.body.appendChild(btn);
+
+        // Defer the click so any MutationObserver-style binding inside the SDK
+        // has a chance to attach to our newly-inserted button.
+        requestAnimationFrame(() => {
+            try { btn.click(); } catch (e) { /* no-op */ }
+            setTimeout(() => {
+                if (btn.parentNode) btn.parentNode.removeChild(btn);
+            }, 1500);
+        });
+        return true;
+    }
+
+    function parseProductOptions(raw) {
+        if (!raw || typeof raw !== 'string') return [];
+        return raw.split(',').map(s => s.trim()).filter(Boolean).map(pair => {
+            const [pid, oid] = pair.split(':');
+            return (pid && oid) ? { productId: pid.trim(), optionId: oid.trim() } : null;
+        }).filter(Boolean);
+    }
+
+    class VentrataWidget {
+        constructor(container) {
+            this.el = container;
+            this.products = [];
+            this.selectedProduct = null;
+            this.selectedOption = null;
+            this.selectedDate = null;
+            this.units = [];
+            this.datepicker = null;
+            this.availableDates = [];
+            this.currentBookingUuid = null;
+            this.currentSlotData = null;
+
+            this.presetProductId = this.el.dataset.productId || '';
+            this.presetOptionId = this.el.dataset.optionId || '';
+            this.presetProductOptions = parseProductOptions(this.el.dataset.productOptions || '');
+            this.lang = getLang(this.el);
+            this.t = STRINGS[this.lang];
+
+            this.bindElements();
+            this.bindEvents();
+            this.loadProducts();
+        }
+
+        /* -----------------------------------------------------------------
+         * DOM references
+         * -------------------------------------------------------------- */
+
+        bindElements() {
+            this.experienceSelect = this.el.querySelector('.vbw-experience-select');
+            this.dateInput = this.el.querySelector('.vbw-date-input');
+            this.findBtn = this.el.querySelector('.vbw-find-btn');
+			this.modal = this.el.querySelector('.vbw-modal');
+            if (this.modal) {
+                document.body.appendChild(this.modal);
+            }
+            this.modalDialog = this.modal?.querySelector('.vbw-modal-dialog') || null;
+            this.modalCloseBtn = this.modal?.querySelector('.vbw-modal-close') || null;
+            this.resultsPanel = this.modal?.querySelector('.vbw-results') || null;
+            this.bookingPanel = this.modal?.querySelector('.vbw-booking-panel') || null;
+            this.loader = this.modal?.querySelector('.vbw-loader') || null;
+        }
+
+        /* -----------------------------------------------------------------
+         * Events
+         * -------------------------------------------------------------- */
+
+        bindEvents() {
+            this.experienceSelect.addEventListener('change', () => this.onExperienceChange());
+            this.findBtn.addEventListener('click', () => this.findTickets());
+			if (this.modalCloseBtn) {
+                this.modalCloseBtn.addEventListener('click', () => this.closeModal());
+            }
+            if (this.modal) {
+                this.modal.addEventListener('click', (e) => {
+                    if (e.target === this.modal) this.closeModal();
+                });
+            }
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && this.modal?.classList.contains('is-open')) {
+                    this.closeModal();
+                }
+            });
+        }
+
+        /* -----------------------------------------------------------------
+         * Products
+         * -------------------------------------------------------------- */
+
+        async loadProducts() {
+            const res = await this.api('get_products');
+            if (!res.success) {
+                this.showError('Could not load experiences. Please try again later.');
+                return;
+            }
+
+            this.products = res.data;
+            this.populateExperiences();
+        }
+
+        populateExperiences() {
+            this.experienceSelect.innerHTML = '';
+            const placeholder = document.createElement('option');
+            placeholder.value = '';
+            placeholder.textContent = this.t.selectExperience;
+            this.experienceSelect.appendChild(placeholder);
+
+            // Curated `product_options` mode: render only the listed pairs, in the order given.
+            // Default selection stays on the placeholder, and FIND TICKETS is disabled until the
+            // user picks one. Group options by product so duplicate option titles across products
+            // (e.g. "Signature Architecture Tour (75 min)" exists for both Navy Pier and Michigan Ave)
+            // remain visually distinguishable via optgroup labels.
+            if (this.presetProductOptions && this.presetProductOptions.length > 0) {
+                const groupsByProduct = new Map();
+                this.presetProductOptions.forEach((pair) => {
+                    const product = this.products.find((p) => p.id === pair.productId);
+                    if (!product) return;
+                    const option = (product.options || []).find((o) => o.id === pair.optionId);
+                    if (!option) return;
+                    if (!groupsByProduct.has(product.id)) {
+                        groupsByProduct.set(product.id, { product, options: [] });
+                    }
+                    groupsByProduct.get(product.id).options.push(option);
+                });
+
+                const productCount = groupsByProduct.size;
+                groupsByProduct.forEach(({ product, options }) => {
+                    const parent = productCount > 1 ? document.createElement('optgroup') : this.experienceSelect;
+                    if (productCount > 1) {
+                        parent.label = product.title || product.internalName;
+                    }
+                    options.forEach((option) => {
+                        const opt = document.createElement('option');
+                        opt.value = JSON.stringify({ productId: product.id, optionId: option.id });
+                        opt.textContent = option.title || option.internalName;
+                        parent.appendChild(opt);
+                    });
+                    if (productCount > 1) {
+                        this.experienceSelect.appendChild(parent);
+                    }
+                });
+                if (this.findBtn) this.findBtn.disabled = true;
+                return;
+            }
+
+            this.products.forEach((product) => {
+                if (this.presetProductId && product.id !== this.presetProductId) return;
+
+                // Round-trip water-taxi products are bookable through the dock
+                // pages, not the experience dropdown — exclude them here.
+                const productLabel = product.title || product.internalName || '';
+                if (/^Round-trip/i.test(productLabel)) return;
+
+                const options = product.options || [];
+
+                if (options.length <= 1) {
+                    const opt = document.createElement('option');
+                    const option = options[0] || {};
+                    opt.value = JSON.stringify({ productId: product.id, optionId: option.id || 'DEFAULT' });
+                    opt.textContent = product.title || product.internalName;
+                    if (this.presetOptionId && option.id === this.presetOptionId) opt.selected = true;
+                    this.experienceSelect.appendChild(opt);
+                } else {
+                    const group = document.createElement('optgroup');
+                    group.label = product.title || product.internalName;
+                    options.forEach((option) => {
+                        if (this.presetOptionId && option.id !== this.presetOptionId) return;
+                        const opt = document.createElement('option');
+                        opt.value = JSON.stringify({ productId: product.id, optionId: option.id });
+                        opt.textContent = option.title || option.internalName;
+                        if (this.presetOptionId && option.id === this.presetOptionId) opt.selected = true;
+                        group.appendChild(opt);
+                    });
+                    this.experienceSelect.appendChild(group);
+                }
+            });
+
+            if (this.presetProductId) {
+                const firstReal = this.experienceSelect.querySelector('option[value]:not([value=""])');
+                if (firstReal) firstReal.selected = true;
+                this.onExperienceChange();
+            }
+        }
+
+        /* -----------------------------------------------------------------
+         * Experience change → load calendar + units
+         * -------------------------------------------------------------- */
+
+        onExperienceChange() {
+            const val = this.experienceSelect.value;
+            if (this.presetProductOptions && this.presetProductOptions.length > 0 && this.findBtn) {
+                this.findBtn.disabled = !val;
+            }
+            if (!val) return;
+
+            const { productId, optionId } = JSON.parse(val);
+            this.selectedProduct = productId;
+            this.selectedOption = optionId;
+
+            const product = this.products.find((p) => p.id === productId);
+            const option = (product?.options || []).find((o) => o.id === optionId);
+
+            this.buildUnits(option);
+            this.loadCalendar(productId, optionId);
+
+            this.hidePanel(this.resultsPanel);
+            this.hidePanel(this.bookingPanel);
+        }
+
+        buildUnits(option) {
+            if (!option) return;
+
+            const unitTypes = (option.units || []).filter((u) => u.type !== 'INFANT' || true);
+            this.units = unitTypes.map((u) => ({
+                id: u.id,
+                name: u.internalName,
+                type: u.type,
+                minAge: u.restrictions?.minAge ?? null,
+                maxAge: u.restrictions?.maxAge ?? null,
+                quantity: u.type === 'ADULT' ? 2 : 0,
+            }));
+        }
+
+        ageLabel(unit) {
+            if (unit.minAge != null && unit.maxAge != null) return `Ages ${unit.minAge}–${unit.maxAge}`;
+            if (unit.minAge != null) return `Ages ${unit.minAge}+`;
+            return '';
+        }
+
+        /* -----------------------------------------------------------------
+         * Calendar / Date picker
+         * -------------------------------------------------------------- */
+
+        async loadCalendar(productId, optionId) {
+            this.dateInput.value = '';
+            this.selectedDate = null;
+            if (this.datepicker) this.datepicker.destroy();
+
+            const res = await this.api('get_calendar', { product_id: productId, option_id: optionId });
+            if (!res.success) return;
+
+            this.availableDates = (res.data || [])
+                .filter((d) => d.available)
+                .map((d) => d.localDate);
+
+            this.datepicker = flatpickr(this.dateInput, {
+                dateFormat: 'Y-m-d',
+                altInput: true,
+                altFormat: 'M j, Y',
+                minDate: 'today',
+                enable: this.availableDates,
+                onChange: (dates) => {
+                    if (dates[0]) {
+                        this.selectedDate = this.formatDate(dates[0]);
+                    }
+                },
+            });
+
+            if (this.availableDates.length > 0) {
+                this.datepicker.setDate(this.availableDates[0], true);
+                this.selectedDate = this.availableDates[0];
+            }
+        }
+
+        /* -----------------------------------------------------------------
+         * Find Tickets
+         * -------------------------------------------------------------- */
+
+        async findTickets() {
+            if (!this.selectedProduct || !this.selectedOption) {
+                this.showError('Please select an experience.');
+                return;
+            }
+            if (!this.selectedDate) {
+                this.showError('Please select a date.');
+                return;
+            }
+
+            this.clearError();
+            this.hidePanel(this.resultsPanel);
+            this.hidePanel(this.bookingPanel);
+            this.showLoader();
+
+            const res = await this.api('get_availability', {
+                product_id: this.selectedProduct,
+                option_id: this.selectedOption,
+                date: this.selectedDate,
+            });
+
+            this.hideLoader();
+
+            if (!res.success) {
+                this.showError('Could not load availability. Please try again.');
+                return;
+            }
+
+            this.renderSlots(res.data || []);
+        }
+
+        /* -----------------------------------------------------------------
+         * Time Slots
+         * -------------------------------------------------------------- */
+
+        renderSlots(slots) {
+            if (!slots.length) {
+                this.resultsPanel.innerHTML = '<div class="vbw-no-results">No available times for this date. Please try another date.</div>';
+                this.showPanel(this.resultsPanel);
+                return;
+            }
+
+            const dateLabel = this.formatDateLabel(this.selectedDate);
+            let html = `<h3 class="vbw-results-heading">Available Times &mdash; ${this.esc(dateLabel)}</h3><div class="vbw-slots">`;
+
+            slots.forEach((slot) => {
+                const time = this.formatTime(slot.localDateTimeStart || slot.localDate);
+                const status = this.slotStatus(slot);
+
+                html += `
+                <div class="vbw-slot" data-availability-id="${this.esc(slot.id)}">
+                    <div class="vbw-slot-time">${time}</div>
+                    <div class="vbw-slot-status ${status.cls}">${status.text}</div>
+                </div>`;
+            });
+
+            html += '</div>';
+            this.resultsPanel.innerHTML = html;
+            this.showPanel(this.resultsPanel);
+
+            this.resultsPanel.querySelectorAll('.vbw-slot').forEach((el) => {
+                el.addEventListener('click', () => {
+                    const availId = el.dataset.availabilityId;
+                    const slot = slots.find((s) => s.id === availId);
+                    this.selectSlot(slot);
+                });
+            });
+        }
+
+        slotStatus(slot) {
+            if (!slot.available) return { text: 'Sold out', cls: 'sold-out' };
+            if (slot.vacancies != null && slot.vacancies <= 10) return { text: `${slot.vacancies} left`, cls: 'limited' };
+            return { text: 'Available', cls: '' };
+        }
+
+        slotPrice(slot) {
+            const pricing = slot.unitPricing || slot.pricing;
+            if (!pricing) return '';
+
+            let total = 0;
+            this.units.forEach((u) => {
+                if (u.quantity <= 0) return;
+                const up = (Array.isArray(pricing) ? pricing : []).find((p) => p.unitId === u.id);
+                if (up) total += (up.retail || up.original || 0) * u.quantity;
+            });
+
+            if (total <= 0 && slot.pricing) {
+                total = slot.pricing.retail || slot.pricing.original || 0;
+            }
+
+            if (total <= 0) return '';
+            const currency = slot.pricing?.currency || (Array.isArray(pricing) && pricing[0]?.currency) || 'USD';
+            return this.formatCurrency(total, currency);
+        }
+
+        /* -----------------------------------------------------------------
+         * Booking Form
+         * -------------------------------------------------------------- */
+
+        selectSlot(slot) {
+            if (!slot) return;
+            this.currentSlotData = slot;
+
+            this.bookingPanel.innerHTML = '';
+            this.showPanel(this.bookingPanel);
+            this.hidePanel(this.resultsPanel);
+
+            this.handoffToVentrata();
+        }
+
+        /* -----------------------------------------------------------------
+         * Hand-off: reserve booking via OCTO, then open Ventrata's prebuilt modal
+         * -------------------------------------------------------------- */
+
+        async handoffToVentrata() {
+            const bookBtn = this.bookingPanel.querySelector('.vbw-book-btn');
+            if (!this.selectedProduct) {
+                this.showError('Please select an experience first.');
+                return;
+            }
+
+            this.clearError();
+            if (bookBtn) {
+                bookBtn.disabled = true;
+                bookBtn.textContent = 'Opening checkout…';
+            }
+            this.renderHandoffStatus();
+
+            // We do NOT pre-create a booking server-side. Orders created via the
+            // OCTO host (api.ventrata.com) are not visible to the Web Checkout
+            // SDK, which reads from checkout-api.ventrata.com (separate connection
+            // scope, origin-authenticated). Pre-creating only produces orphan
+            // bookings that auto-expire and breaks the SDK with a 400 on the
+            // order lookup. Instead we hand the SDK productID/optionID + the
+            // user's date/time so it can pre-fill its calendar; the SDK then
+            // creates and confirms the booking in its own scope.
+            const config = buildCheckoutHandoffConfig({
+                productId: this.selectedProduct,
+                optionId: this.selectedOption,
+                dateToPreselect: this.selectedDate || '',
+                timeslotToPreselect: extractTimeslotHHMM(
+                    this.currentSlotData?.localDateTimeStart || this.currentSlotData?.id || ''
+                ),
+            });
+
+            const diag = captureVentrataDiagnostics();
+
+            const handoffOk = openVentrataCheckout(config);
+
+            if (!handoffOk) {
+                diag.stop();
+                this.renderHandoffNotConfigured();
+                return;
+            }
+
+            const opened = await waitForVentrataModalRendered(6000);
+            diag.stop();
+
+            if (opened) {
+                this.closeModal();
+                return;
+            }
+
+            const errs = diag.getErrors();
+            if (errs.length) {
+                this.renderHandoffStatusWithErrors(errs);
+            }
+        }
+
+        renderHandoffStatus() {
+            this.bookingPanel.innerHTML = `
+            <div class="vbw-handoff-status">
+                <div class="vbw-spinner" aria-hidden="true"></div>
+                <h3 class="vbw-handoff-title">Opening secure checkout&hellip;</h3>
+                <p>You'll confirm date, time and guests in the next step.</p>
+                <details class="vbw-handoff-troubleshoot">
+                    <summary>Modal didn&rsquo;t open?</summary>
+                    <ul>
+                        <li>The current domain must be in the allowed-origins list of your Web Checkout connection in Ventrata. The SDK authenticates by origin/referer, not by API key.</li>
+                        <li>Disable ad blockers / privacy extensions, then reload the page.</li>
+                        <li>Open your browser console: <code>CHECKOUT_HOST_REQUIRES_CHECKOUT_CONNECTION</code> means this domain is not registered with Ventrata.</li>
+                    </ul>
+                </details>
+                <button type="button" class="vbw-booking-back vbw-handoff-close">Close</button>
+            </div>`;
+            const closeBtn = this.bookingPanel.querySelector('.vbw-handoff-close');
+            if (closeBtn) closeBtn.addEventListener('click', () => this.closeModal());
+        }
+
+        renderHandoffNotConfigured() {
+            this.bookingPanel.innerHTML = `
+            <div class="vbw-handoff-status">
+                <h3 class="vbw-handoff-title">Checkout SDK not available on this page</h3>
+                <p>The Ventrata Checkout SDK (<code>ventrata-checkout.min.js</code>) is not loaded here, so we cannot open the booking modal.</p>
+                <p>Pick one of:</p>
+                <ul>
+                    <li>Have your theme load the SDK script tag on this URL (recommended if your theme already loads it on other pages).</li>
+                    <li>Or open Settings → Ventrata Booking and set <strong>Inject SDK script</strong> to "Yes" and provide a valid Checkout API key.</li>
+                </ul>
+                <button type="button" class="vbw-booking-back vbw-handoff-close">Close</button>
+            </div>`;
+            const closeBtn = this.bookingPanel.querySelector('.vbw-handoff-close');
+            if (closeBtn) closeBtn.addEventListener('click', () => this.closeModal());
+        }
+
+        renderHandoffStatusWithErrors(errors) {
+            const originRejected = errors.some((e) =>
+                String(e.errorCode || '').toUpperCase().includes('CHECKOUT_HOST_REQUIRES_CHECKOUT_CONNECTION')
+                || String(e.errorMessage || '').toLowerCase().includes('checkout connection')
+            );
+            const currentOrigin = (typeof window !== 'undefined' && window.location && window.location.origin) ? window.location.origin : 'this domain';
+            const advice = originRejected
+                ? `<div class="vbw-handoff-advice"><strong>Action required:</strong> Ventrata rejected the request because <code>${this.esc(currentOrigin)}</code> isn't registered as an allowed origin for your Web Checkout connection. The SDK authenticates by domain (origin/referer), not by API key — so the same key that works on a registered domain (e.g. your staging site) will fail here until this domain is added.<br/><br/>Ask Ventrata to add <code>${this.esc(currentOrigin)}</code> to the allowed-origins list of the Web Checkout connection in your dashboard, then reload this page.</div>`
+                : `<div class="vbw-handoff-advice"><strong>Action required:</strong> Ventrata rejected the request. Check the Checkout settings on Ventrata's dashboard (allowed origins, connection status) and try again.</div>`;
+
+            const list = errors.map((e) => {
+                const code = e.errorCode ? `<code>${this.esc(e.errorCode)}</code>` : '';
+                const msg = this.esc(e.errorMessage || '');
+                const status = e.status ? ` <span class="vbw-handoff-status-code">[${e.status}]</span>` : '';
+                return `<li>${code}${status} ${msg}</li>`;
+            }).join('');
+
+            this.bookingPanel.innerHTML = `
+            <div class="vbw-handoff-status">
+                <h3 class="vbw-handoff-title">Checkout could not open</h3>
+                ${advice}
+                <details class="vbw-handoff-troubleshoot" open>
+                    <summary>Errors returned by Ventrata</summary>
+                    <ul class="vbw-handoff-errors">${list}</ul>
+                </details>
+                <button type="button" class="vbw-booking-back vbw-handoff-close">Close</button>
+            </div>`;
+            const closeBtn = this.bookingPanel.querySelector('.vbw-handoff-close');
+            if (closeBtn) closeBtn.addEventListener('click', () => this.closeModal());
+        }
+
+        /* -----------------------------------------------------------------
+         * UI Helpers
+         * -------------------------------------------------------------- */
+
+        showPanel(panel) {
+            if (!panel || !panel.classList) return;
+            panel.classList.add('is-visible');
+            this.openModal();
+        }
+
+        hidePanel(panel) {
+            if (!panel || !panel.classList) return;
+            panel.classList.remove('is-visible');
+            if (!this.hasVisibleModalContent()) {
+                this.closeModal();
+            }
+        }
+
+        showLoader() {
+            if (!this.loader || !this.loader.classList) return;
+            this.loader.classList.add('is-visible');
+            this.openModal();
+        }
+
+        hideLoader() {
+            if (!this.loader || !this.loader.classList) return;
+            this.loader.classList.remove('is-visible');
+            if (!this.hasVisibleModalContent()) {
+                this.closeModal();
+            }
+        }
+
+        hasVisibleModalContent() {
+            return [this.resultsPanel, this.bookingPanel, this.loader]
+                .some((el) => el && el.classList.contains('is-visible'));
+        }
+
+        openModal() {
+            if (!this.modal) return;
+            this.modal.classList.add('is-open');
+            this.modal.setAttribute('aria-hidden', 'false');
+            document.body.classList.add('vbw-modal-open');
+        }
+
+        closeModal() {
+            if (!this.modal) return;
+            this.modal.classList.remove('is-open');
+            this.modal.setAttribute('aria-hidden', 'true');
+            document.body.classList.remove('vbw-modal-open');
+            [this.resultsPanel, this.bookingPanel, this.loader].forEach((el) => {
+                if (el) el.classList.remove('is-visible');
+            });
+        }
+
+        showError(msg) {
+            this.clearError();
+            const el = document.createElement('div');
+            el.className = 'vbw-error';
+            el.textContent = msg;
+			const modalBody = this.modal?.querySelector('.vbw-modal-body');
+            const panel = this.bookingPanel?.classList.contains('is-visible')
+                ? this.bookingPanel
+                : this.resultsPanel?.classList.contains('is-visible')
+                    ? this.resultsPanel
+                        : null;
+
+            if (modalBody && this.modal?.classList.contains('is-open')) {
+                if (panel) {
+                    panel.insertAdjacentElement('afterbegin', el);
+                } else {
+                    modalBody.insertAdjacentElement('afterbegin', el);
+                }
+                this.openModal();
+                return;
+            }
+
+            this.el.querySelector('.vbw-search-bar').insertAdjacentElement('afterend', el);
+        }
+
+        clearError() {
+            this.el.querySelectorAll('.vbw-error').forEach((err) => err.remove());
+        }
+
+        /* -----------------------------------------------------------------
+         * Formatting
+         * -------------------------------------------------------------- */
+
+        formatDate(date) {
+            const d = date instanceof Date ? date : new Date(date);
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${y}-${m}-${day}`;
+        }
+
+        formatDateLabel(dateStr) {
+            const d = new Date(dateStr + 'T12:00:00');
+            return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        }
+
+        formatTime(dateTimeStr) {
+            if (!dateTimeStr) return '';
+            const timePart = dateTimeStr.includes('T') ? dateTimeStr.split('T')[1] : null;
+            if (!timePart) return '';
+            const [h, m] = timePart.split(':').map(Number);
+            const suffix = h >= 12 ? 'PM' : 'AM';
+            const hour12 = h % 12 || 12;
+            return `${hour12}:${String(m).padStart(2, '0')} ${suffix}`;
+        }
+
+        formatCurrency(amountInCents, currency = 'USD') {
+            const precision = currency === 'USD' ? 2 : 2;
+            const amount = amountInCents / Math.pow(10, precision);
+            return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount);
+        }
+
+        esc(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        /* -----------------------------------------------------------------
+         * API calls via WordPress AJAX
+         * -------------------------------------------------------------- */
+
+        async api(action, data = {}) {
+            const formData = new FormData();
+            formData.append('action', `ventrata_${action}`);
+            formData.append('nonce', ventrataConfig.nonce);
+            Object.entries(data).forEach(([key, val]) => formData.append(key, val));
+
+            try {
+                const response = await fetch(ventrataConfig.ajaxUrl, {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'same-origin',
+                });
+                return await response.json();
+            } catch (e) {
+                return { success: false, data: { message: 'Network error. Please check your connection.' } };
+            }
+        }
+    }
+
+    /* =================================================================
+     * VentrataSchedule – "Today on the Water" schedule listing
+     * ================================================================= */
+
+    class VentrataSchedule {
+        constructor(container) {
+            this.el = container;
+            this.date = this.el.dataset.date || new Date().toISOString().slice(0, 10);
+            this.maxItems = parseInt(this.el.dataset.maxItems, 10) || 10;
+            this.allSlots = [];
+            this.activeFilter = 'All';
+            this.expanded = false;
+
+            this.filtersEl = this.el.querySelector('.vbw-schedule-filters');
+            this.dateLabel = this.el.querySelector('.vbw-schedule-date-label');
+            this.listEl = this.el.querySelector('.vbw-schedule-list');
+            this.loader = this.el.querySelector('.vbw-loader');
+            this.toggleBtn = this.el.querySelector('.vbw-schedule-cta--toggle');
+
+            if (this.toggleBtn) {
+                this.toggleBtn.addEventListener('click', () => this.toggleExpand());
+            }
+
+            this.load();
+        }
+
+        async load() {
+            this.showLoader();
+            const res = await this.api('get_schedule', { date: this.date });
+            this.hideLoader();
+
+            if (!res.success) {
+                this.listEl.innerHTML = '<div class="vbw-no-results">Could not load schedule.</div>';
+                return;
+            }
+
+            this.allSlots = (res.data || []).filter((s) => s.available);
+            this.renderDateLabel();
+            this.buildFilters();
+            this.renderList();
+        }
+
+        /* ---------- Date label ---------- */
+
+        renderDateLabel() {
+            const d = new Date(this.date + 'T12:00:00');
+            const label = d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+            this.dateLabel.textContent = label;
+        }
+
+        /* ---------- Category detection ---------- */
+
+        getCategory(slot) {
+            const name = (slot.productName || '').toLowerCase();
+            if (name.includes('architecture')) return 'Architecture';
+            if (name.includes('lake') || name.includes('skyline')) return 'Lake';
+            if (name.includes('water taxi') || name.includes('taxi')) return 'Water Taxi';
+            if (name.includes('firework')) return 'Fireworks';
+            if (name.includes('shoreline')) return 'Water Taxi';
+            return 'Other';
+        }
+
+        getCategoryColor(cat) {
+            const map = {
+                Architecture: '#1e3a5f',
+                Lake: '#3b7dd8',
+                'Water Taxi': '#27ae60',
+                Fireworks: '#e8602c',
+                Other: '#6b7a8d',
+            };
+            return map[cat] || map.Other;
+        }
+
+        /* ---------- Filters ---------- */
+
+        buildFilters() {
+            const categories = ['All'];
+            this.allSlots.forEach((s) => {
+                const cat = this.getCategory(s);
+                if (!categories.includes(cat)) categories.push(cat);
+            });
+
+            if (categories.length <= 2) {
+                this.filtersEl.style.display = 'none';
+                return;
+            }
+
+            this.filtersEl.innerHTML = categories
+                .map((c) => `<button type="button" class="vbw-filter-pill${c === this.activeFilter ? ' is-active' : ''}" data-cat="${this.esc(c)}">${this.esc(c)}</button>`)
+                .join('');
+
+            this.filtersEl.querySelectorAll('.vbw-filter-pill').forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    this.activeFilter = btn.dataset.cat;
+                    this.filtersEl.querySelectorAll('.vbw-filter-pill').forEach((b) => b.classList.toggle('is-active', b === btn));
+                    this.renderList();
+                });
+            });
+        }
+
+        /* ---------- List rendering ---------- */
+
+        renderList() {
+            let slots = this.activeFilter === 'All'
+                ? this.allSlots
+                : this.allSlots.filter((s) => this.getCategory(s) === this.activeFilter);
+
+            const limit = this.expanded ? slots.length : this.maxItems;
+            const visible = slots.slice(0, limit);
+
+            if (!visible.length) {
+                this.listEl.innerHTML = '<div class="vbw-no-results">No tours scheduled for this date.</div>';
+                if (this.toggleBtn) this.toggleBtn.style.display = 'none';
+                return;
+            }
+
+            this.listEl.innerHTML = visible.map((slot) => {
+                const cat = this.getCategory(slot);
+                const color = this.getCategoryColor(cat);
+                const time = this.formatTime(slot.localDateTimeStart);
+                const badge = this.getBadge(slot);
+                const displayName = this.getDisplayName(slot);
+
+                return `
+                <div class="vbw-sched-row" style="border-left-color:${color}">
+                    <div class="vbw-sched-left">
+                        <span class="vbw-sched-time">${time}</span>
+                        <span class="vbw-sched-sep">&mdash;</span>
+                        <span class="vbw-sched-name">${this.esc(displayName)}</span>
+                    </div>
+                    <div class="vbw-sched-badge ${badge.cls}">${this.esc(badge.text)}</div>
+                </div>`;
+            }).join('');
+
+            if (this.toggleBtn) {
+                this.toggleBtn.style.display = slots.length > this.maxItems ? '' : 'none';
+                this.toggleBtn.textContent = this.expanded ? 'SHOW LESS' : 'VIEW FULL SCHEDULE';
+            }
+        }
+
+        getDisplayName(slot) {
+            const option = slot.optionName || '';
+            const product = slot.productName || '';
+            // Prefer the option's cleaned internalName so variants like
+            // "90-Minute Architecture Tour from Navy Pier" or "Spanish ..."
+            // surface in the schedule. Fall back to product when the option
+            // is empty or literally "DEFAULT".
+            if (option && option !== 'DEFAULT') {
+                return option;
+            }
+            return product;
+        }
+
+        getBadge(slot) {
+            if (!slot.available) return { text: 'Sold out', cls: 'vbw-badge--soldout' };
+            if (slot.vacancies != null && slot.vacancies <= 10) return { text: 'Limited seats', cls: 'vbw-badge--limited' };
+            if (slot.vacancies != null && slot.vacancies <= 30) return { text: 'Filling up', cls: 'vbw-badge--filling' };
+            return { text: 'Available', cls: 'vbw-badge--available' };
+        }
+
+        toggleExpand() {
+            this.expanded = !this.expanded;
+            this.renderList();
+        }
+
+        /* ---------- Helpers ---------- */
+
+        formatTime(dateTimeStr) {
+            if (!dateTimeStr) return '';
+            const timePart = dateTimeStr.includes('T') ? dateTimeStr.split('T')[1] : null;
+            if (!timePart) return '';
+            const [h, m] = timePart.split(':').map(Number);
+            const suffix = h >= 12 ? 'PM' : 'AM';
+            const hour12 = h % 12 || 12;
+            return `${hour12}:${String(m).padStart(2, '0')} ${suffix}`;
+        }
+
+        esc(str) {
+            const div = document.createElement('div');
+            div.textContent = str || '';
+            return div.innerHTML;
+        }
+
+        showLoader() { if (this.loader && this.loader.classList) this.loader.classList.add('is-visible'); }
+        hideLoader() { if (this.loader && this.loader.classList) this.loader.classList.remove('is-visible'); }
+
+        async api(action, data = {}) {
+            const formData = new FormData();
+            formData.append('action', `ventrata_${action}`);
+            formData.append('nonce', ventrataConfig.nonce);
+            Object.entries(data).forEach(([key, val]) => formData.append(key, val));
+            try {
+                const response = await fetch(ventrataConfig.ajaxUrl, { method: 'POST', body: formData, credentials: 'same-origin' });
+                return await response.json();
+            } catch (e) {
+                return { success: false, data: { message: 'Network error.' } };
+            }
+        }
+    }
+
+    /* =================================================================
+     * VentrataRouteSchedule – Route status table
+     * ================================================================= */
+
+    class VentrataRouteSchedule {
+        constructor(container) {
+            this.el = container;
+            this.date = this.el.dataset.date || new Date().toISOString().slice(0, 10);
+            this.defaultStatus = this.el.dataset.defaultStatus || 'Not operating this day';
+            this.routes = [];
+
+            try {
+                this.routes = JSON.parse(this.el.dataset.routes || '[]');
+            } catch (e) {
+                this.routes = [];
+            }
+
+            this.rowsEl = this.el.querySelector('.vbw-route-rows');
+            this.loader = this.el.querySelector('.vbw-loader');
+
+            this.load();
+        }
+
+        async load() {
+            if (!this.routes.length) {
+                this.rowsEl.innerHTML = '<div class="vbw-no-results">No routes configured.</div>';
+                return;
+            }
+
+            const needsRouteStatusApi = this.routes.some((r) => {
+                if (r.status) return false;
+                if (r.product_id && r.option_id) return true;
+                return Boolean(r.name && String(r.name).trim());
+            });
+
+            if (needsRouteStatusApi) {
+                this.showLoader();
+                const res = await this.api('get_route_status', {
+                    date: this.date,
+                    routes: JSON.stringify(this.routes),
+                });
+                this.hideLoader();
+
+                if (res.success) {
+                    this.render(res.data);
+                    return;
+                }
+            }
+
+            this.render(this.routes.map((r) => ({
+                name: r.name || '',
+                operating: false,
+                status: r.status || '',
+                times: [],
+            })));
+        }
+
+        render(routeData) {
+            if (!routeData.length) {
+                this.rowsEl.innerHTML = '<div class="vbw-no-results">No routes available.</div>';
+                return;
+            }
+
+            this.rowsEl.innerHTML = routeData.map((route) => {
+                const statusText = this.getStatusText(route);
+                const statusCls = route.operating ? 'vbw-route-status--active' : 'vbw-route-status--inactive';
+
+                return `
+                <div class="vbw-route-row">
+                    <span class="vbw-route-name">${this.esc(route.name)}</span>
+                    <span class="vbw-route-status ${statusCls}">${this.esc(statusText)}</span>
+                </div>`;
+            }).join('');
+        }
+
+        getStatusText(route) {
+            if (route.status) return route.status;
+
+            if (!route.operating || !Array.isArray(route.opening_hours) || !route.opening_hours.length) {
+                return this.defaultStatus;
+            }
+
+            const text = route.opening_hours
+                .map((range) => {
+                    const from = this.formatTime(range && range.from);
+                    const to   = this.formatTime(range && range.to);
+                    return from && to ? `${from} – ${to}` : '';
+                })
+                .filter(Boolean)
+                .join(', ');
+
+            return text || this.defaultStatus;
+        }
+
+        formatTime(input) {
+            if (!input) return '';
+            const str = String(input);
+            const timePart = str.includes('T') ? str.split('T')[1] : str;
+            if (!timePart) return '';
+            const [h, m] = timePart.split(':').map(Number);
+            if (Number.isNaN(h) || Number.isNaN(m)) return '';
+            const suffix = h >= 12 ? 'PM' : 'AM';
+            const hour12 = h % 12 || 12;
+            return `${hour12}:${String(m).padStart(2, '0')} ${suffix}`;
+        }
+
+        esc(str) {
+            const div = document.createElement('div');
+            div.textContent = str || '';
+            return div.innerHTML;
+        }
+
+        showLoader() { if (this.loader && this.loader.classList) this.loader.classList.add('is-visible'); }
+        hideLoader() { if (this.loader && this.loader.classList) this.loader.classList.remove('is-visible'); }
+
+        async api(action, data = {}) {
+            const formData = new FormData();
+            formData.append('action', `ventrata_${action}`);
+            formData.append('nonce', ventrataConfig.nonce);
+            Object.entries(data).forEach(([key, val]) => formData.append(key, val));
+            try {
+                const response = await fetch(ventrataConfig.ajaxUrl, { method: 'POST', body: formData, credentials: 'same-origin' });
+                return await response.json();
+            } catch (e) {
+                return { success: false, data: { message: 'Network error.' } };
+            }
+        }
+    }
+
+    /* =================================================================
+     * VentrataQuote – "Get a custom quote" pricing request form
+     * ================================================================= */
+
+    class VentrataQuote {
+        constructor(container) {
+            this.el = container;
+            this.successMessage = this.el.dataset.successMessage || 'Thank you! We will get back to you shortly.';
+
+            this.dateInput = this.el.querySelector('.vbw-quote-date-input');
+            this.eventType = this.el.querySelector('[name="event_type"]');
+            this.budgetRange = this.el.querySelector('[name="budget_range"]');
+            this.groupSize = this.el.querySelector('[name="group_size"]');
+            this.submitBtn = this.el.querySelector('.vbw-quote-submit');
+            this.resultEl = this.el.querySelector('.vbw-quote-result');
+            this.loader = this.el.querySelector('.vbw-loader');
+
+            this.originalBtnText = this.submitBtn.textContent;
+            this.initDatePicker();
+            this.submitBtn.addEventListener('click', () => this.submit());
+        }
+
+        initDatePicker() {
+            this.datepicker = flatpickr(this.dateInput, {
+                mode: 'range',
+                dateFormat: 'Y-m-d',
+                altInput: true,
+                altFormat: 'M j, Y',
+                minDate: 'today',
+            });
+        }
+
+        async submit() {
+            this.hideResult();
+
+            const dateRange = this.dateInput.value;
+            const eventType = this.eventType.value;
+            const budget = this.budgetRange.value;
+            const groupSize = this.groupSize.value;
+
+            if (!dateRange) { this.showResult('Please select a date or date range.', true); return; }
+            if (!eventType) { this.showResult('Please select an event type.', true); return; }
+            if (!groupSize || parseInt(groupSize, 10) < 1) { this.showResult('Please enter a valid group size.', true); return; }
+
+            this.submitBtn.disabled = true;
+            this.submitBtn.textContent = 'Sending…';
+
+            const res = await this.api('submit_quote', {
+                date_range: dateRange,
+                event_type: eventType,
+                budget_range: budget,
+                group_size: groupSize,
+            });
+
+            this.submitBtn.disabled = false;
+            this.submitBtn.textContent = this.originalBtnText;
+
+            if (res.success) {
+                this.showResult(this.successMessage, false);
+            } else {
+                this.showResult(res.data?.message || 'Something went wrong. Please try again.', true);
+            }
+        }
+
+        showResult(msg, isError) {
+            this.resultEl.textContent = msg;
+            this.resultEl.className = 'vbw-quote-result is-visible ' + (isError ? 'vbw-quote-error' : 'vbw-quote-success');
+        }
+
+        hideResult() {
+            this.resultEl.className = 'vbw-quote-result';
+            this.resultEl.textContent = '';
+        }
+
+        async api(action, data = {}) {
+            const formData = new FormData();
+            formData.append('action', `ventrata_${action}`);
+            formData.append('nonce', ventrataConfig.nonce);
+            Object.entries(data).forEach(([key, val]) => formData.append(key, val));
+            try {
+                const response = await fetch(ventrataConfig.ajaxUrl, { method: 'POST', body: formData, credentials: 'same-origin' });
+                return await response.json();
+            } catch (e) {
+                return { success: false, data: { message: 'Network error.' } };
+            }
+        }
+    }
+
+    /* =================================================================
+     * VentrataBookingBar – Compact inline booking search bar
+     * ================================================================= */
+
+    class VentrataBookingBar {
+        constructor(container) {
+            this.el = container;
+            this.products = [];
+            this.selectedProduct = null;
+            this.selectedOption = null;
+            this.selectedDate = null;
+            this.units = [];
+            this.datepicker = null;
+            this.availableDates = [];
+            this.currentBookingUuid = null;
+            this.currentSlotData = null;
+
+            this.presetProductId = this.el.dataset.productId || '';
+            this.presetOptionId = this.el.dataset.optionId || '';
+            this.staticLocations = (this.el.dataset.locations || '').split(',').map(s => s.trim()).filter(Boolean);
+
+            this.experienceSelect = this.el.querySelector('.vbw-bar-experience');
+            this.locationSelect = this.el.querySelector('.vbw-bar-location');
+            this.dateInput = this.el.querySelector('.vbw-bar-date');
+            this.findBtn = this.el.querySelector('.vbw-bar-btn');
+            this.resultsPanel = this.el.querySelector('.vbw-results');
+            this.bookingPanel = this.el.querySelector('.vbw-booking-panel');
+            this.loader = this.el.querySelector('.vbw-loader');
+
+            this.experienceSelect.addEventListener('change', () => this.onExperienceChange());
+            this.findBtn.addEventListener('click', () => this.findTimes());
+
+            this.loadProducts();
+        }
+
+        async loadProducts() {
+            const res = await this.api('get_products');
+            if (!res.success) {
+                this.showError('Could not load experiences.');
+                return;
+            }
+            this.products = res.data;
+            this.populateExperiences();
+        }
+
+        populateExperiences() {
+            this.experienceSelect.innerHTML = '';
+            const placeholder = document.createElement('option');
+            placeholder.value = '';
+            placeholder.textContent = 'Select';
+            this.experienceSelect.appendChild(placeholder);
+
+            this.products.forEach((product) => {
+                if (this.presetProductId && product.id !== this.presetProductId) return;
+
+                // Round-trip water-taxi products are bookable through the dock
+                // pages, not the experience dropdown — exclude them here.
+                const productLabel = product.title || product.internalName || '';
+                if (/^Round-trip/i.test(productLabel)) return;
+
+                const options = product.options || [];
+                if (options.length <= 1) {
+                    const opt = document.createElement('option');
+                    const option = options[0] || {};
+                    opt.value = JSON.stringify({ productId: product.id, optionId: option.id || 'DEFAULT' });
+                    opt.textContent = product.title || product.internalName;
+                    if (this.presetOptionId && option.id === this.presetOptionId) opt.selected = true;
+                    this.experienceSelect.appendChild(opt);
+                } else {
+                    const group = document.createElement('optgroup');
+                    group.label = product.title || product.internalName;
+                    options.forEach((option) => {
+                        if (this.presetOptionId && option.id !== this.presetOptionId) return;
+                        const opt = document.createElement('option');
+                        opt.value = JSON.stringify({ productId: product.id, optionId: option.id });
+                        opt.textContent = option.title || option.internalName;
+                        if (this.presetOptionId && option.id === this.presetOptionId) opt.selected = true;
+                        group.appendChild(opt);
+                    });
+                    this.experienceSelect.appendChild(group);
+                }
+            });
+
+            if (this.staticLocations.length) {
+                this.populateLocations(this.staticLocations);
+            }
+
+            if (this.presetProductId) {
+                const firstReal = this.experienceSelect.querySelector('option[value]:not([value=""])');
+                if (firstReal) firstReal.selected = true;
+                this.onExperienceChange();
+            }
+        }
+
+        populateLocations(names) {
+            this.locationSelect.innerHTML = '';
+            const all = document.createElement('option');
+            all.value = '';
+            all.textContent = 'All';
+            this.locationSelect.appendChild(all);
+
+            names.forEach((name) => {
+                const opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = name;
+                this.locationSelect.appendChild(opt);
+            });
+        }
+
+        onExperienceChange() {
+            const val = this.experienceSelect.value;
+            if (!val) return;
+
+            const { productId, optionId } = JSON.parse(val);
+            this.selectedProduct = productId;
+            this.selectedOption = optionId;
+
+            const product = this.products.find((p) => p.id === productId);
+            const option = (product?.options || []).find((o) => o.id === optionId);
+
+            this.buildUnits(option);
+
+            if (!this.staticLocations.length && product) {
+                const optionNames = (product.options || [])
+                    .map((o) => o.title || o.internalName)
+                    .filter((n) => n && n !== 'DEFAULT');
+                if (optionNames.length > 1) {
+                    this.populateLocations(optionNames);
+                }
+            }
+
+            this.loadCalendar(productId, optionId);
+            this.hidePanel(this.resultsPanel);
+            this.hidePanel(this.bookingPanel);
+        }
+
+        buildUnits(option) {
+            if (!option) return;
+            this.units = (option.units || []).map((u) => ({
+                id: u.id,
+                name: u.internalName,
+                type: u.type,
+                quantity: u.type === 'ADULT' ? 2 : 0,
+            }));
+        }
+
+        async loadCalendar(productId, optionId) {
+            this.dateInput.value = '';
+            this.selectedDate = null;
+            if (this.datepicker) this.datepicker.destroy();
+
+            const res = await this.api('get_calendar', { product_id: productId, option_id: optionId });
+            if (!res.success) return;
+
+            this.availableDates = (res.data || []).filter((d) => d.available).map((d) => d.localDate);
+
+            const today = new Date().toISOString().slice(0, 10);
+            const todayAvailable = this.availableDates.includes(today);
+
+            this.datepicker = flatpickr(this.dateInput, {
+                dateFormat: 'Y-m-d',
+                altInput: true,
+                altFormat: 'M j',
+                minDate: 'today',
+                enable: this.availableDates,
+                onChange: (dates) => {
+                    if (dates[0]) {
+                        const iso = this.formatDate(dates[0]);
+                        this.selectedDate = iso;
+                        const todayStr = new Date().toISOString().slice(0, 10);
+                        if (iso === todayStr && this.datepicker?.altInput) {
+                            this.datepicker.altInput.value = 'Today';
+                        }
+                    }
+                },
+            });
+
+            if (todayAvailable) {
+                this.datepicker.setDate(today, true);
+                this.selectedDate = today;
+                if (this.datepicker.altInput) this.datepicker.altInput.value = 'Today';
+            } else if (this.availableDates.length > 0) {
+                this.datepicker.setDate(this.availableDates[0], true);
+                this.selectedDate = this.availableDates[0];
+            }
+        }
+
+        async findTimes() {
+            if (!this.selectedProduct || !this.selectedOption) {
+                this.showError('Please select an experience.');
+                return;
+            }
+            if (!this.selectedDate) {
+                this.showError('Please select a date.');
+                return;
+            }
+
+            this.clearError();
+            this.hidePanel(this.resultsPanel);
+            this.hidePanel(this.bookingPanel);
+            this.showLoader();
+
+            const res = await this.api('get_availability', {
+                product_id: this.selectedProduct,
+                option_id: this.selectedOption,
+                date: this.selectedDate,
+            });
+
+            this.hideLoader();
+
+            if (!res.success) {
+                this.showError('Could not load availability. Please try again.');
+                return;
+            }
+
+            this.renderSlots(res.data || []);
+        }
+
+        renderSlots(slots) {
+            if (!slots.length) {
+                this.resultsPanel.innerHTML = '<div class="vbw-no-results">No available times for this date.</div>';
+                this.showPanel(this.resultsPanel);
+                return;
+            }
+
+            const dateLabel = this.formatDateLabel(this.selectedDate);
+            let html = `<h3 class="vbw-results-heading">Available Times &mdash; ${this.esc(dateLabel)}</h3><div class="vbw-slots">`;
+
+            slots.forEach((slot) => {
+                const time = this.formatTime(slot.localDateTimeStart || slot.localDate);
+                const status = this.slotStatus(slot);
+
+                html += `
+                <div class="vbw-slot" data-availability-id="${this.esc(slot.id)}">
+                    <div class="vbw-slot-time">${time}</div>
+                    <div class="vbw-slot-status ${status.cls}">${status.text}</div>
+                </div>`;
+            });
+
+            html += '</div>';
+            this.resultsPanel.innerHTML = html;
+            this.showPanel(this.resultsPanel);
+
+            this.resultsPanel.querySelectorAll('.vbw-slot').forEach((el) => {
+                el.addEventListener('click', () => {
+                    const slot = slots.find((s) => s.id === el.dataset.availabilityId);
+                    this.selectSlot(slot);
+                });
+            });
+        }
+
+        slotStatus(slot) {
+            if (!slot.available) return { text: 'Sold out', cls: 'sold-out' };
+            if (slot.vacancies != null && slot.vacancies <= 10) return { text: `${slot.vacancies} left`, cls: 'limited' };
+            return { text: 'Available', cls: '' };
+        }
+
+        selectSlot(slot) {
+            if (!slot) return;
+            this.currentSlotData = slot;
+
+            this.bookingPanel.innerHTML = '';
+            this.showPanel(this.bookingPanel);
+            this.hidePanel(this.resultsPanel);
+
+            this.handoffToVentrata();
+        }
+
+        async handoffToVentrata() {
+            const bookBtn = this.bookingPanel.querySelector('.vbw-book-btn');
+            if (!this.selectedProduct) {
+                this.showError('Please select an experience first.');
+                return;
+            }
+
+            this.clearError();
+            if (bookBtn) {
+                bookBtn.disabled = true;
+                bookBtn.textContent = 'Opening checkout…';
+            }
+            this.renderHandoffStatus();
+
+            // No server-side booking pre-creation: orders made via OCTO host
+            // aren't visible to the Web Checkout SDK (different connection scope).
+            const config = buildCheckoutHandoffConfig({
+                productId: this.selectedProduct,
+                optionId: this.selectedOption,
+                dateToPreselect: this.selectedDate || '',
+                timeslotToPreselect: extractTimeslotHHMM(
+                    this.currentSlotData?.localDateTimeStart || this.currentSlotData?.id || ''
+                ),
+            });
+
+            const diag = captureVentrataDiagnostics();
+
+            const handoffOk = openVentrataCheckout(config);
+
+            if (!handoffOk) {
+                diag.stop();
+                this.renderHandoffNotConfigured();
+                return;
+            }
+
+            const opened = await waitForVentrataModalRendered(6000);
+            diag.stop();
+            if (opened) {
+                this.hidePanel(this.bookingPanel);
+                this.hidePanel(this.resultsPanel);
+                return;
+            }
+
+            const errs = diag.getErrors();
+            if (errs.length) {
+                this.renderHandoffStatusWithErrors(errs);
+            }
+        }
+
+        renderHandoffStatus() {
+            this.bookingPanel.innerHTML = `
+            <div class="vbw-handoff-status">
+                <div class="vbw-spinner" aria-hidden="true"></div>
+                <h3 class="vbw-handoff-title">Opening secure checkout&hellip;</h3>
+                <p>You'll confirm date, time and guests in the next step.</p>
+                <details class="vbw-handoff-troubleshoot">
+                    <summary>Modal didn&rsquo;t open?</summary>
+                    <ul>
+                        <li>The current domain must be in the allowed-origins list of your Web Checkout connection in Ventrata. The SDK authenticates by origin/referer, not by API key.</li>
+                        <li>Disable ad blockers / privacy extensions, then reload the page.</li>
+                        <li>Open your browser console: <code>CHECKOUT_HOST_REQUIRES_CHECKOUT_CONNECTION</code> means this domain is not registered with Ventrata.</li>
+                    </ul>
+                </details>
+                <button type="button" class="vbw-booking-back vbw-handoff-close">Close</button>
+            </div>`;
+            const closeBtn = this.bookingPanel.querySelector('.vbw-handoff-close');
+            if (closeBtn) closeBtn.addEventListener('click', () => this.hidePanel(this.bookingPanel));
+        }
+
+        renderHandoffNotConfigured() {
+            this.bookingPanel.innerHTML = `
+            <div class="vbw-handoff-status">
+                <h3 class="vbw-handoff-title">Checkout SDK not available on this page</h3>
+                <p>The Ventrata Checkout SDK (<code>ventrata-checkout.min.js</code>) is not loaded here, so we cannot open the booking modal.</p>
+                <p>Pick one of:</p>
+                <ul>
+                    <li>Have your theme load the SDK script tag on this URL (recommended if your theme already loads it on other pages).</li>
+                    <li>Or open Settings → Ventrata Booking and set <strong>Inject SDK script</strong> to "Yes" and provide a valid Checkout API key.</li>
+                </ul>
+                <button type="button" class="vbw-booking-back vbw-handoff-close">Close</button>
+            </div>`;
+            const closeBtn = this.bookingPanel.querySelector('.vbw-handoff-close');
+            if (closeBtn) closeBtn.addEventListener('click', () => this.hidePanel(this.bookingPanel));
+        }
+
+        renderHandoffStatusWithErrors(errors) {
+            const originRejected = errors.some((e) =>
+                String(e.errorCode || '').toUpperCase().includes('CHECKOUT_HOST_REQUIRES_CHECKOUT_CONNECTION')
+                || String(e.errorMessage || '').toLowerCase().includes('checkout connection')
+            );
+            const currentOrigin = (typeof window !== 'undefined' && window.location && window.location.origin) ? window.location.origin : 'this domain';
+            const advice = originRejected
+                ? `<div class="vbw-handoff-advice"><strong>Action required:</strong> Ventrata rejected the request because <code>${this.esc(currentOrigin)}</code> isn't registered as an allowed origin for your Web Checkout connection. The SDK authenticates by domain (origin/referer), not by API key — so the same key that works on a registered domain (e.g. your staging site) will fail here until this domain is added.<br/><br/>Ask Ventrata to add <code>${this.esc(currentOrigin)}</code> to the allowed-origins list of the Web Checkout connection in your dashboard, then reload this page.</div>`
+                : `<div class="vbw-handoff-advice"><strong>Action required:</strong> Ventrata rejected the request. Check the Checkout settings on Ventrata's dashboard (allowed origins, connection status) and try again.</div>`;
+
+            const list = errors.map((e) => {
+                const code = e.errorCode ? `<code>${this.esc(e.errorCode)}</code>` : '';
+                const msg = this.esc(e.errorMessage || '');
+                const status = e.status ? ` <span class="vbw-handoff-status-code">[${e.status}]</span>` : '';
+                return `<li>${code}${status} ${msg}</li>`;
+            }).join('');
+
+            this.bookingPanel.innerHTML = `
+            <div class="vbw-handoff-status">
+                <h3 class="vbw-handoff-title">Checkout could not open</h3>
+                ${advice}
+                <details class="vbw-handoff-troubleshoot" open>
+                    <summary>Errors returned by Ventrata</summary>
+                    <ul class="vbw-handoff-errors">${list}</ul>
+                </details>
+                <button type="button" class="vbw-booking-back vbw-handoff-close">Close</button>
+            </div>`;
+            const closeBtn = this.bookingPanel.querySelector('.vbw-handoff-close');
+            if (closeBtn) closeBtn.addEventListener('click', () => this.hidePanel(this.bookingPanel));
+        }
+
+        showPanel(panel) { if (panel && panel.classList) panel.classList.add('is-visible'); }
+        hidePanel(panel) { if (panel && panel.classList) panel.classList.remove('is-visible'); }
+        showLoader() { if (this.loader && this.loader.classList) this.loader.classList.add('is-visible'); }
+        hideLoader() { if (this.loader && this.loader.classList) this.loader.classList.remove('is-visible'); }
+
+        showError(msg) {
+            this.clearError();
+            const el = document.createElement('div');
+            el.className = 'vbw-error';
+            el.textContent = msg;
+            const panel = this.bookingPanel?.classList.contains('is-visible')
+                ? this.bookingPanel
+                : this.resultsPanel?.classList.contains('is-visible')
+                    ? this.resultsPanel
+                    : null;
+            if (panel) {
+                panel.insertAdjacentElement('afterbegin', el);
+                return;
+            }
+            this.el.querySelector('.vbw-bar-row').insertAdjacentElement('afterend', el);
+        }
+
+        clearError() {
+            this.el.querySelectorAll('.vbw-error').forEach((err) => err.remove());
+        }
+
+        formatDate(date) {
+            const d = date instanceof Date ? date : new Date(date);
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${y}-${m}-${day}`;
+        }
+
+        formatDateLabel(dateStr) {
+            const d = new Date(dateStr + 'T12:00:00');
+            return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        }
+
+        formatTime(dateTimeStr) {
+            if (!dateTimeStr) return '';
+            const timePart = dateTimeStr.includes('T') ? dateTimeStr.split('T')[1] : null;
+            if (!timePart) return '';
+            const [h, m] = timePart.split(':').map(Number);
+            const suffix = h >= 12 ? 'PM' : 'AM';
+            const hour12 = h % 12 || 12;
+            return `${hour12}:${String(m).padStart(2, '0')} ${suffix}`;
+        }
+
+        formatCurrency(amountInCents, currency = 'USD') {
+            const amount = amountInCents / 100;
+            return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount);
+        }
+
+        esc(str) {
+            const div = document.createElement('div');
+            div.textContent = str || '';
+            return div.innerHTML;
+        }
+
+        async api(action, data = {}) {
+            const formData = new FormData();
+            formData.append('action', `ventrata_${action}`);
+            formData.append('nonce', ventrataConfig.nonce);
+            Object.entries(data).forEach(([key, val]) => formData.append(key, val));
+            try {
+                const response = await fetch(ventrataConfig.ajaxUrl, { method: 'POST', body: formData, credentials: 'same-origin' });
+                return await response.json();
+            } catch (e) {
+                return { success: false, data: { message: 'Network error.' } };
+            }
+        }
+    }
+
+    /* -----------------------------------------------------------------
+     * Auto-initialise all widgets on the page
+     * -------------------------------------------------------------- */
+
+    function initWidgets() {
+        document.querySelectorAll('.vbw-container').forEach((el) => {
+            if (!el._vbwInit) {
+                el._vbwInit = true;
+                new VentrataWidget(el);
+            }
+        });
+        document.querySelectorAll('.vbw-schedule').forEach((el) => {
+            if (!el._vbwInit) {
+                el._vbwInit = true;
+                new VentrataSchedule(el);
+            }
+        });
+        document.querySelectorAll('.vbw-route-schedule').forEach((el) => {
+            if (!el._vbwInit) {
+                el._vbwInit = true;
+                new VentrataRouteSchedule(el);
+            }
+        });
+        document.querySelectorAll('.vbw-quote').forEach((el) => {
+            if (!el._vbwInit) {
+                el._vbwInit = true;
+                new VentrataQuote(el);
+            }
+        });
+        document.querySelectorAll('.vbw-bar').forEach((el) => {
+            if (!el._vbwInit) {
+                el._vbwInit = true;
+                new VentrataBookingBar(el);
+            }
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initWidgets);
+    } else {
+        initWidgets();
+    }
+})();

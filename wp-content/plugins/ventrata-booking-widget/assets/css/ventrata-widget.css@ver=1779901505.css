@@ -1,0 +1,1419 @@
+/* ==========================================================================
+   Ventrata Booking Widget
+   ========================================================================== */
+
+:root {
+    --vbw-orange: #e8602c;
+    --vbw-orange-hover: #d04f1e;
+    --vbw-blue: #3b7dd8;
+    --vbw-navy: #1e2a3a;
+    --vbw-gray: #888888;
+    --vbw-input-bg: #B5DBF9;
+    --vbw-border: #dce3ec;
+    --vbw-white: #ffffff;
+    --vbw-success: #27ae60;
+    --vbw-radius: 8px;
+    --vbw-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* Container */
+.vbw-container {
+    position: relative;
+    font-family: var(--vbw-font);
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+.vbw-container *, .vbw-container *::before, .vbw-container *::after {
+    box-sizing: border-box;
+}
+
+/* Modal */
+.vbw-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(14, 24, 38, 0.55);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 9999;
+}
+
+.vbw-modal.is-open {
+    display: flex;
+}
+
+.vbw-modal-dialog {
+    width: min(980px, 100%);
+    max-height: min(90vh, 900px);
+    overflow: auto;
+    background: var(--vbw-white);
+    border-radius: 12px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.24);
+    position: relative;
+    padding: 24px;
+}
+
+.vbw-modal-close {
+    position: sticky;
+    float: right;
+    top: 0;
+    right: 0;
+    width: 36px;
+    height: 36px;
+    border: 0;
+    border-radius: 50%;
+    background: #eef3f8;
+    color: var(--vbw-navy);
+    font-size: 26px;
+    line-height: 1;
+    cursor: pointer;
+    z-index: 1;
+}
+
+.vbw-modal-body {
+    clear: both;
+}
+
+body.vbw-modal-open {
+    overflow: hidden;
+}
+
+/* Header */
+.vbw-header {
+    text-align: center;
+    margin-bottom: 24px;
+}
+
+.vbw-heading {
+    font-size: 24px;
+    font-weight: 700;
+    /* color: var(--vbw-navy); */
+	color: #1E2A78;
+    margin: 0 0 4px;
+}
+
+.vbw-subheading {
+    font-size: 16px;
+	font-weight: 400;
+    color: var(--vbw-gray);
+    margin: 0;
+}
+
+/* Search Bar */
+.vbw-search-bar {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+    background: var(--vbw-white);
+    border-radius: var(--vbw-radius);
+    padding: 8px;
+}
+
+.vbw-field {
+    display: flex;
+    flex-direction: column;
+    position: relative;
+}
+
+.vbw-field--experience {
+    flex: 2.5;
+}
+
+.vbw-field--date {
+    flex: 1;
+}
+
+.vbw-field--guests {
+    flex: 0.8;
+}
+
+.vbw-field--button {
+    flex: 0 0 auto;
+}
+
+.vbw-label {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--vbw-orange);
+    margin-bottom: 6px;
+    padding-left: 4px;
+}
+
+.vbw-input-wrap {
+    background: var(--vbw-input-bg);
+    border-radius: 25px;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    transition: box-shadow 0.2s;
+	border: 0;
+}
+
+.vbw-input-wrap input {
+	background: var(--vbw-input-bg);
+    border-radius: 25px;
+	border: 0;
+}
+
+.vbw-input-wrap:hover {
+    box-shadow: 0 0 0 2px rgba(59, 125, 216, 0.2);
+}
+
+/* Experience Select */
+.vbw-experience-select {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    font-size: 14px;
+    color: var(--vbw-navy);
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    outline: none;
+    padding-right: 20px;
+    background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8d' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 16px center;
+}
+
+/* Date Input */
+.vbw-date-input {
+    width: 100%;
+    border: none;
+    background: transparent;
+    font-size: 14px;
+    color: var(--vbw-navy);
+    cursor: pointer;
+    outline: none;
+}
+
+/* Guests Trigger */
+.vbw-guests-trigger {
+    justify-content: space-between;
+    user-select: none;
+    color: #62707c;
+    box-sizing: border-box;
+    -webkit-appearance: none;
+	appearance: none;
+    padding: 12px;
+    border: solid 1px #d4dde5;
+    transition: 0.1s ease-in-out;
+    border-radius: 25px;
+    font-size: 17px;
+    width: 100%;
+    border: 0;
+}
+
+.vbw-guests-text {
+    font-size: 14px;
+    color: var(--vbw-navy);
+}
+
+.vbw-chevron {
+    color: var(--vbw-gray);
+    transition: transform 0.2s;
+    flex-shrink: 0;
+}
+
+.vbw-guests-trigger.is-open .vbw-chevron {
+    transform: rotate(180deg);
+}
+
+@media(width <= 1000px) {
+	.vbw-guests-trigger {
+		padding: 9px;
+	}
+	.vbw-find-btn {
+		height: 42px;
+	}
+}
+
+/* Guests Dropdown */
+.vbw-guests-dropdown {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    min-width: 240px;
+    background: var(--vbw-white);
+    border-radius: var(--vbw-radius);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+    padding: 16px;
+    z-index: 100;
+    margin-top: 6px;
+}
+
+.vbw-guests-dropdown.is-open {
+    display: block;
+}
+
+.vbw-guest-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0;
+}
+
+.vbw-guest-row + .vbw-guest-row {
+    border-top: 1px solid var(--vbw-border);
+}
+
+.vbw-guest-info {
+    display: flex;
+    flex-direction: column;
+}
+
+.vbw-guest-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--vbw-navy);
+}
+
+.vbw-guest-age {
+    font-size: 11px;
+    color: var(--vbw-gray);
+}
+
+.vbw-guest-counter {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.vbw-counter-btn {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    border: 2px solid var(--vbw-border);
+    background: var(--vbw-white);
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--vbw-navy);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: border-color 0.2s, color 0.2s;
+    padding: 0;
+    line-height: 1;
+}
+
+.vbw-counter-btn:hover:not(:disabled) {
+    border-color: var(--vbw-blue);
+    color: var(--vbw-blue);
+}
+
+.vbw-counter-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
+.vbw-counter-value {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--vbw-navy);
+    min-width: 18px;
+    text-align: center;
+}
+
+.vbw-guests-done {
+    display: block;
+    width: 100%;
+    margin-top: 12px;
+    padding: 8px;
+    background: var(--vbw-blue);
+    color: var(--vbw-white);
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.vbw-guests-done:hover {
+    background: #2d6bc4;
+}
+
+/* Find Tickets Button */
+.vbw-find-btn {
+    height: 47px;
+    padding: 0 28px;
+    background: var(--vbw-orange);
+    color: var(--vbw-white);
+    border: none;
+    border-radius: 24px;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s, transform 0.1s;
+}
+
+.vbw-find-btn:hover {
+    background: var(--vbw-orange-hover);
+}
+
+.vbw-find-btn:active {
+    transform: scale(0.97);
+}
+
+.vbw-find-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* Loader */
+.vbw-loader {
+    display: none;
+    text-align: center;
+    padding: 40px;
+}
+
+.vbw-loader.is-visible {
+    display: block;
+}
+
+.vbw-spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid var(--vbw-border);
+    border-top-color: var(--vbw-blue);
+    border-radius: 50%;
+    margin: 0 auto;
+    animation: vbw-spin 0.7s linear infinite;
+}
+
+@keyframes vbw-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ==========================================================================
+   Results – Time Slots
+   ========================================================================== */
+
+.vbw-results {
+    display: none;
+    margin-top: 24px;
+}
+
+.vbw-modal-body .vbw-results {
+    margin-top: 0;
+}
+
+.vbw-results.is-visible {
+    display: block;
+}
+
+.vbw-results-heading {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--vbw-navy);
+    margin: 0 0 16px;
+}
+
+.vbw-slots {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+}
+
+.vbw-slot {
+    background: var(--vbw-white);
+    border: 2px solid var(--vbw-border);
+    border-radius: var(--vbw-radius);
+    padding: 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.vbw-slot:hover {
+    border-color: var(--vbw-blue);
+    box-shadow: 0 4px 12px rgba(59, 125, 216, 0.15);
+}
+
+.vbw-slot-time {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--vbw-navy);
+    margin-bottom: 4px;
+}
+
+.vbw-slot-status {
+    font-size: 12px;
+    color: var(--vbw-success);
+    margin-bottom: 8px;
+}
+
+.vbw-slot-status.limited {
+    color: var(--vbw-orange);
+}
+
+.vbw-slot-price {
+    font-size: 14px;
+    color: var(--vbw-gray);
+}
+
+.vbw-no-results {
+    text-align: center;
+    padding: 32px;
+    color: var(--vbw-gray);
+    font-size: 15px;
+}
+
+/* ==========================================================================
+   Booking Panel
+   ========================================================================== */
+
+.vbw-booking-panel {
+    display: none;
+    margin-top: 24px;
+    background: var(--vbw-white);
+    border-radius: var(--vbw-radius);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+    overflow: hidden;
+}
+
+.vbw-modal-body .vbw-booking-panel {
+    margin-top: 0;
+}
+
+.vbw-booking-panel.is-visible {
+    display: block;
+}
+
+.vbw-booking-summary {
+    background: var(--vbw-input-bg);
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--vbw-border);
+}
+
+.vbw-booking-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--vbw-navy);
+    margin: 0 0 4px;
+}
+
+.vbw-booking-meta {
+    font-size: 13px;
+    color: var(--vbw-gray);
+    margin: 0 0 12px;
+}
+
+.vbw-booking-lines {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.vbw-booking-line {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    color: var(--vbw-navy);
+    padding: 3px 0;
+}
+
+.vbw-booking-total {
+    display: flex;
+    justify-content: space-between;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--vbw-navy);
+    border-top: 1px solid var(--vbw-border);
+    padding-top: 8px;
+    margin-top: 8px;
+}
+
+.vbw-booking-form-inner {
+    padding: 24px;
+}
+
+.vbw-form-row {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.vbw-form-group {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.vbw-form-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--vbw-gray);
+    margin-bottom: 4px;
+}
+
+.vbw-form-input {
+    height: 42px;
+    padding: 0 12px;
+    border: 2px solid var(--vbw-border);
+    border-radius: 6px;
+    font-size: 14px;
+    color: var(--vbw-navy);
+    outline: none;
+    transition: border-color 0.2s;
+    font-family: var(--vbw-font);
+}
+
+.vbw-form-input:focus {
+    border-color: var(--vbw-blue);
+}
+
+.vbw-book-btn {
+    width: 100%;
+    height: 48px;
+    background: var(--vbw-orange);
+    color: var(--vbw-white);
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.2s;
+    font-family: var(--vbw-font);
+}
+
+.vbw-book-btn:hover {
+    background: var(--vbw-orange-hover);
+}
+
+.vbw-book-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.vbw-booking-back {
+    display: inline-block;
+    margin-top: 12px;
+    font-size: 13px;
+    color: var(--vbw-blue);
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: var(--vbw-font);
+}
+
+.vbw-booking-back:hover {
+    text-decoration: underline;
+}
+
+/* ==========================================================================
+   Confirmation
+   ========================================================================== */
+
+.vbw-confirmation-panel {
+    display: none;
+    margin-top: 24px;
+    text-align: center;
+    background: var(--vbw-white);
+    border-radius: var(--vbw-radius);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+    padding: 40px 24px;
+}
+
+.vbw-modal-body .vbw-confirmation-panel {
+    margin-top: 0;
+}
+
+.vbw-confirmation-panel.is-visible {
+    display: block;
+}
+
+.vbw-confirm-icon {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--vbw-success);
+    color: var(--vbw-white);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 16px;
+    font-size: 28px;
+}
+
+.vbw-confirm-heading {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--vbw-navy);
+    margin: 0 0 8px;
+}
+
+.vbw-confirm-ref {
+    font-size: 14px;
+    color: var(--vbw-gray);
+    margin: 0 0 4px;
+}
+
+.vbw-confirm-details {
+    font-size: 15px;
+    color: var(--vbw-navy);
+    margin: 16px 0 0;
+    line-height: 1.6;
+}
+
+/* ==========================================================================
+   Error
+   ========================================================================== */
+
+.vbw-error {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+    padding: 12px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    margin-top: 16px;
+}
+
+/* ==========================================================================
+   Flatpickr overrides
+   ========================================================================== */
+
+.flatpickr-calendar {
+    font-family: var(--vbw-font) !important;
+    border-radius: var(--vbw-radius) !important;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12) !important;
+}
+
+.flatpickr-day.selected,
+.flatpickr-day.selected:hover {
+    background: var(--vbw-blue) !important;
+    border-color: var(--vbw-blue) !important;
+}
+
+.flatpickr-day:hover {
+    background: var(--vbw-input-bg) !important;
+}
+
+/* ==========================================================================
+   Responsive
+   ========================================================================== */
+
+@media (max-width: 768px) {
+    .vbw-search-bar {
+        flex-direction: column;
+        gap: 16px;
+    }
+
+	.vbw-field {
+		width: 100%;
+	}
+	
+    .vbw-field--experience,
+    .vbw-field--date,
+    .vbw-field--guests,
+    .vbw-field--button {
+        flex: 1 1 100%;
+    }
+
+    .vbw-find-btn {
+        width: 100%;
+    }
+
+    .vbw-form-row {
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .vbw-slots {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+@media (max-width: 480px) {
+    .vbw-slots {
+        grid-template-columns: 1fr;
+    }
+
+    .vbw-heading {
+        font-size: 20px;
+    }
+}
+
+/* ==========================================================================
+   Schedule Widget – "Today on the Water"
+   ========================================================================== */
+
+.vbw-schedule {
+    position: relative;
+    font-family: var(--vbw-font);
+    margin: 0 auto;
+    background: var(--vbw-input-bg);
+    border-radius: 16px;
+    padding: 40px 32px 32px;
+    box-sizing: border-box;
+}
+
+.vbw-schedule *, .vbw-schedule *::before, .vbw-schedule *::after {
+    box-sizing: border-box;
+}
+
+.vbw-schedule .vbw-header {
+    margin-bottom: 20px;
+}
+
+/* ---------- Filter Pills ---------- */
+
+.vbw-schedule-filters {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 28px;
+}
+
+.vbw-filter-pill {
+    padding: 8px 20px;
+    border-radius: 24px;
+    border: 2px solid var(--vbw-navy);
+    background: transparent;
+    color: var(--vbw-navy);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s;
+    font-family: var(--vbw-font);
+}
+
+.vbw-filter-pill:hover {
+    background: rgba(30, 42, 58, 0.08);
+}
+
+.vbw-filter-pill.is-active {
+    background: var(--vbw-navy);
+    color: var(--vbw-white);
+}
+
+/* ---------- Date Label ---------- */
+
+.vbw-schedule-date-label {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--vbw-navy);
+    margin-bottom: 16px;
+    padding-left: 4px;
+}
+
+/* ---------- Schedule Rows ---------- */
+
+.vbw-schedule-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.vbw-sched-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--vbw-white);
+    border-radius: 8px;
+    padding: 16px 20px;
+    border-left: 4px solid var(--vbw-navy);
+    transition: box-shadow 0.2s;
+}
+
+.vbw-sched-row:hover {
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+}
+
+.vbw-sched-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.vbw-sched-time {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--vbw-navy);
+    white-space: nowrap;
+}
+
+.vbw-sched-sep {
+    color: var(--vbw-gray);
+    font-size: 14px;
+}
+
+.vbw-sched-name {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--vbw-navy);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ---------- Badges ---------- */
+
+.vbw-sched-badge {
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    padding-left: 16px;
+}
+
+.vbw-badge--available {
+    color: var(--vbw-blue);
+}
+
+.vbw-badge--limited {
+    color: var(--vbw-orange);
+}
+
+.vbw-badge--filling {
+    color: var(--vbw-blue);
+}
+
+.vbw-badge--soldout {
+    color: #991b1b;
+}
+
+/* ---------- Footer / CTA Button ---------- */
+
+.vbw-schedule-footer {
+    text-align: center;
+    margin-top: 28px;
+}
+
+.vbw-schedule-cta {
+    display: inline-block;
+    padding: 12px 32px;
+    background: var(--vbw-navy);
+    color: var(--vbw-white);
+    border: none;
+    border-radius: 24px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 0.2s;
+    font-family: var(--vbw-font);
+}
+
+.vbw-schedule-cta:hover {
+    background: #2d3e54;
+}
+
+/* ---------- Schedule Responsive ---------- */
+
+@media (max-width: 600px) {
+    .vbw-schedule {
+        padding: 24px 16px 20px;
+    }
+
+    .vbw-sched-row {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+        padding: 14px 16px;
+    }
+
+    .vbw-sched-badge {
+        padding-left: 0;
+    }
+
+    .vbw-filter-pill {
+        padding: 6px 14px;
+        font-size: 12px;
+    }
+}
+
+/* ==========================================================================
+   Route Schedule Widget – "Route schedule & map"
+   ========================================================================== */
+
+.vbw-route-schedule {
+    position: relative;
+    font-family: var(--vbw-font);
+    max-width: 900px;
+    margin: 0 auto;
+    /* background: var(--vbw-input-bg); */
+    border-radius: 16px;
+    padding: 40px 32px 32px;
+    box-sizing: border-box;
+}
+
+.vbw-route-schedule *, .vbw-route-schedule *::before, .vbw-route-schedule *::after {
+    box-sizing: border-box;
+}
+
+.vbw-route-schedule .vbw-header {
+    margin-bottom: 24px;
+}
+
+.vbw-route-schedule .vbw-subheading {
+    max-width: 560px;
+    margin-left: auto;
+    margin-right: auto;
+    line-height: 1.5;
+}
+
+/* ---------- Frequency Bar ---------- */
+
+.vbw-freq-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    /* background: var(--vbw-navy); */
+	background: #1E2A78;
+    border-radius: 10px;
+    padding: 16px 24px;
+    margin-bottom: 28px;
+}
+
+.vbw-freq-label {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--vbw-white);
+}
+
+.vbw-freq-value {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--vbw-white);
+}
+
+/* ---------- Route Table ---------- */
+
+.vbw-route-table {
+    background: var(--vbw-white);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.vbw-route-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    border-bottom: 2px solid var(--vbw-input-bg);
+}
+
+.vbw-route-col-label {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--vbw-navy);
+}
+
+.vbw-route-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 24px;
+    border-left: 4px solid var(--vbw-blue);
+    transition: background 0.15s;
+}
+
+.vbw-route-row + .vbw-route-row {
+    border-top: 1px solid var(--vbw-input-bg);
+}
+
+.vbw-route-row:hover {
+    background: rgba(237, 242, 248, 0.5);
+}
+
+.vbw-route-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--vbw-navy);
+}
+
+.vbw-route-status {
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    padding-left: 16px;
+}
+
+.vbw-route-status--active {
+    color: var(--vbw-success);
+    font-weight: 600;
+}
+
+.vbw-route-status--inactive {
+    color: var(--vbw-gray);
+    font-style: italic;
+}
+
+/* ---------- Route Schedule Responsive ---------- */
+
+@media (max-width: 600px) {
+    .vbw-route-schedule {
+        padding: 24px 16px 20px;
+    }
+
+    .vbw-freq-bar {
+        flex-direction: column;
+        gap: 4px;
+        text-align: center;
+        padding: 14px 20px;
+    }
+
+    .vbw-route-header-row,
+    .vbw-route-row {
+        padding: 12px 16px;
+    }
+
+    .vbw-route-row {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+    }
+
+    .vbw-route-status {
+        padding-left: 0;
+    }
+}
+
+/* ==========================================================================
+   Quote Widget – "Get a custom quote"
+   ========================================================================== */
+
+.vbw-quote {
+    position: relative;
+    font-family: var(--vbw-font);
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+.vbw-quote input {
+	background: #B5DBF9;
+	border-radius: 25px;
+} 
+
+.vbw-quote *, .vbw-quote *::before, .vbw-quote *::after {
+    box-sizing: border-box;
+}
+
+.vbw-quote .vbw-heading {
+    /* color: var(--vbw-navy); */
+	color: #1E2A78;
+}
+
+.vbw-quote-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.vbw-quote-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+}
+
+.vbw-quote-row .vbw-field--date-range,
+.vbw-quote-row .vbw-field--event-type {
+    flex: 1;
+}
+
+.vbw-quote-row .vbw-field--budget {
+    flex: 1;
+}
+
+.vbw-quote-row .vbw-field--group-size {
+    flex: 0.6;
+}
+
+.vbw-quote-row .vbw-field--button {
+    flex: 1.2;
+}
+
+.vbw-quote-select {
+    width: 100%;
+    border: none;
+    background: transparent;
+    font-size: 14px;
+    color: var(--vbw-navy);
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    outline: none;
+    padding-right: 20px;
+    background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8d' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 16px center;
+    font-family: var(--vbw-font);
+	border: 0;
+}
+
+.vbw-quote-number {
+    width: 100%;
+    border: none;
+    background: transparent;
+    font-size: 14px;
+    color: var(--vbw-navy);
+    outline: none;
+    font-family: var(--vbw-font);
+    appearance: textfield;
+    -moz-appearance: textfield;
+}
+
+.vbw-quote-number::-webkit-outer-spin-button,
+.vbw-quote-number::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.vbw-quote-date-input {
+    width: 100%;
+    border: none;
+    background: transparent;
+    font-size: 14px;
+    color: var(--vbw-navy);
+    cursor: pointer;
+    outline: none;
+}
+
+.vbw-quote .vbw-find-btn {
+    width: 100%;
+    height: 44px;
+    padding: 0 28px;
+}
+
+.vbw-quote-result {
+    display: none;
+    margin-top: 20px;
+    text-align: center;
+    padding: 20px;
+    border-radius: var(--vbw-radius);
+}
+
+.vbw-quote-result.is-visible {
+    display: block;
+}
+
+.vbw-quote-result.vbw-quote-success {
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    color: #166534;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.vbw-quote-result.vbw-quote-error {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+    font-size: 14px;
+}
+
+/* ---------- Quote Responsive ---------- */
+
+@media (max-width: 768px) {
+    .vbw-quote-row {
+        flex-direction: column;
+        gap: 16px;
+    }
+
+    .vbw-quote-row .vbw-field--date-range,
+    .vbw-quote-row .vbw-field--event-type,
+    .vbw-quote-row .vbw-field--budget,
+    .vbw-quote-row .vbw-field--group-size,
+    .vbw-quote-row .vbw-field--button {
+        flex: 1 1 100%;
+    }
+
+    .vbw-quote .vbw-find-btn {
+        width: 100%;
+    }
+}
+
+/* ==========================================================================
+   Booking Bar – Compact inline search bar
+   ========================================================================== */
+
+.vbw-bar {
+    position: relative;
+    font-family: var(--vbw-font);
+    max-width: 1040px;
+    margin: 0 auto;
+    box-sizing: border-box;
+}
+
+.vbw-bar *, .vbw-bar *::before, .vbw-bar *::after {
+    box-sizing: border-box;
+}
+
+.vbw-bar-tagline {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--vbw-navy);
+    margin: 0 0 14px 8px;
+}
+
+.vbw-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--vbw-white);
+    border-radius: 40px;
+    padding: 8px 8px 8px 6px;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+}
+
+.vbw-bar-field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--vbw-input-bg);
+    border-radius: 24px;
+    height: 40px;
+    padding: 0 16px;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.vbw-bar-field--experience {
+    flex: 2;
+}
+
+.vbw-bar-field--location {
+    flex: 1.4;
+}
+
+.vbw-bar-field--date {
+    flex: 0.8;
+}
+
+.vbw-bar-field--guests {
+    flex: 0.6;
+}
+
+.vbw-bar-field-label {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--vbw-navy);
+    flex-shrink: 0;
+}
+
+.vbw-bar-select {
+    border: none;
+    background: transparent;
+    font-size: 13px;
+    color: var(--vbw-navy);
+    font-weight: 400;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    outline: none;
+    min-width: 0;
+    padding: 0;
+    font-family: var(--vbw-font);
+}
+
+.vbw-bar-date {
+    border: none;
+    background: transparent;
+    font-size: 13px;
+    color: var(--vbw-navy);
+    width: 60px;
+    cursor: pointer;
+    outline: none;
+    font-family: var(--vbw-font);
+}
+
+.vbw-bar-guests-input {
+    border: none;
+    background: transparent;
+    font-size: 13px;
+    color: var(--vbw-navy);
+    width: 32px;
+    outline: none;
+    font-family: var(--vbw-font);
+    appearance: textfield;
+    -moz-appearance: textfield;
+}
+
+.vbw-bar-guests-input::-webkit-outer-spin-button,
+.vbw-bar-guests-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.vbw-bar-btn {
+    flex-shrink: 0;
+    height: 40px;
+    padding: 0 24px;
+    background: var(--vbw-orange);
+    color: var(--vbw-white);
+    border: none;
+    border-radius: 24px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s, transform 0.1s;
+    font-family: var(--vbw-font);
+}
+
+.vbw-bar-btn:hover {
+    background: var(--vbw-orange-hover);
+}
+
+.vbw-bar-btn:active {
+    transform: scale(0.97);
+}
+
+.vbw-bar-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* ---------- Booking Bar Responsive ---------- */
+
+@media (max-width: 768px) {
+    .vbw-bar-row {
+        flex-wrap: wrap;
+        border-radius: 20px;
+        padding: 12px;
+        gap: 8px;
+    }
+
+    .vbw-bar-field--experience,
+    .vbw-bar-field--location {
+        flex: 1 1 calc(50% - 4px);
+    }
+
+    .vbw-bar-field--date,
+    .vbw-bar-field--guests {
+        flex: 1 1 calc(50% - 4px);
+    }
+
+    .vbw-bar-btn {
+        flex: 1 1 100%;
+    }
+}
+
+@media (max-width: 480px) {
+    .vbw-bar-field--experience,
+    .vbw-bar-field--location,
+    .vbw-bar-field--date,
+    .vbw-bar-field--guests {
+        flex: 1 1 100%;
+    }
+}
